@@ -1,0 +1,32 @@
+# Environment configuration (contains sensitive data)
+config.env
+
+# Cache files
+cache/
+*.cache
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.temp
+
+# Backup files
+*.bak
+*.backup
+*~
+

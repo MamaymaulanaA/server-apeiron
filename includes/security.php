@@ -358,25 +358,107 @@ function decrypt_data(string $encrypted_data, ?string $key = null) {
  * @return string|false Validated URL or false if invalid
  */
 function validate_url(string $url) {
-    $url = trim($url);
-    
-    // Remove protocol if present for validation
-    $url_clean = preg_replace('#^https?://#i', '', $url);
-    
-    // Validate domain format
-    if (!preg_match('/^([a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i', $url_clean)) {
+    // Checked before trim(), which would silently swallow a trailing NUL or CRLF.
+    if (preg_match('/[\x00-\x1F\x7F]/', $url)) {
         return false;
     }
-    
-    // Reconstruct URL with protocol
-    if (!preg_match('#^https?://#i', $url)) {
+
+    $url = trim($url);
+
+    if ($url === '' || strlen($url) > 255) {
+        return false;
+    }
+
+    // Percent-encoded control characters are an injection attempt, not a path.
+    if (preg_match('/%(?:0[0-9a-f]|7f)/i', $url)) {
+        return false;
+    }
+
+    // Legacy callers may omit the scheme; default to https as before.
+    if (!preg_match('#^[a-z][a-z0-9+.\-]*://#i', $url)) {
         $url = 'https://' . $url;
     }
-    
-    // Validate with filter_var
-    $url = filter_var($url, FILTER_VALIDATE_URL);
-    
-    return $url !== false ? $url : false;
+
+    $parts = parse_url($url);
+    if ($parts === false || empty($parts['host'])) {
+        return false;
+    }
+
+    // Only real web transports describe a WordPress installation.
+    $scheme = strtolower($parts['scheme'] ?? '');
+    if ($scheme !== 'http' && $scheme !== 'https') {
+        return false;
+    }
+
+    // Credentials embedded in the URL are never part of an installation identity.
+    if (isset($parts['user']) || isset($parts['pass'])) {
+        return false;
+    }
+
+    // Hostname labels only: no IP literals, no IPv6 brackets, no wildcards.
+    $host = strtolower($parts['host']);
+    if (!preg_match('/^([a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/', $host)) {
+        return false;
+    }
+
+    $port = '';
+    if (isset($parts['port'])) {
+        $port_number = (int) $parts['port'];
+        if ($port_number < 1 || $port_number > 65535) {
+            return false;
+        }
+        $port = ':' . $port_number;
+    }
+
+    // Subfolder installs: a plain base path such as /wedding or /client-a.
+    $path = $parts['path'] ?? '';
+    if ($path !== '') {
+        if (!preg_match('#^(/[A-Za-z0-9._~\-]+)*/?$#', $path) || strpos($path, '..') !== false) {
+            return false;
+        }
+        $path = rtrim($path, '/');
+    }
+
+    // Query and fragment describe a request, not an installation.
+    return $scheme . '://' . $host . $port . $path;
+}
+
+/**
+ * Canonical installation identity.
+ *
+ * The same installation must resolve to the same string no matter which
+ * transport a request arrived on, so the scheme, a default port and a trailing
+ * slash are dropped and the hostname is lowercased. Everything that genuinely
+ * separates two installations is preserved: `www`, the subdomain, the
+ * installation subfolder and any non-default port.
+ *
+ * @param string $url Site URL as sent by the client.
+ * @return string|false Canonical identity, or false when the URL is invalid.
+ */
+function canonicalize_site_url(string $url) {
+    $validated = validate_url($url);
+    if ($validated === false) {
+        return false;
+    }
+
+    $parts  = parse_url($validated);
+    $scheme = strtolower($parts['scheme']);
+    $host   = strtolower($parts['host']);
+
+    $port = '';
+    if (isset($parts['port'])) {
+        $port_number = (int) $parts['port'];
+        $is_default  = ($scheme === 'http' && $port_number === 80)
+            || ($scheme === 'https' && $port_number === 443);
+        if (!$is_default) {
+            $port = ':' . $port_number;
+        }
+    }
+
+    $path = preg_replace('#/{2,}#', '/', $parts['path'] ?? '');
+    $path = rtrim($path, '/');
+
+    return $host . $port . $path;
 }
 
 /**

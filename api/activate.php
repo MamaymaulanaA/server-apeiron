@@ -88,6 +88,16 @@ if ($site_url === false) {
     ], 400);
 }
 
+// Transport-independent identity used to match legacy and new activations alike.
+$site_url_canonical = canonicalize_site_url($site_url);
+if ($site_url_canonical === false) {
+    json_response([
+        'success' => false,
+        'message' => 'Invalid site URL format',
+        'error_code' => 'INVALID_URL'
+    ], 400);
+}
+
 // Validate request origin matches claimed site URL
 if (!validate_request_origin($site_url)) {
     // Log failed attempt
@@ -187,13 +197,13 @@ try {
     if ($license['status'] === 'inactive') {
         // Check if there's a previous activation record for this license and site
         $stmt = $db->prepare("
-            SELECT id, status 
-            FROM activations 
-            WHERE license_id = ? 
-            AND site_url = ?
+            SELECT id, status
+            FROM activations
+            WHERE license_id = ?
+            AND (site_url = ? OR site_url_canonical = ?)
             LIMIT 1
         ");
-        $stmt->execute([$license['id'], $site_url]);
+        $stmt->execute([$license['id'], $site_url, $site_url_canonical]);
         $previous_activation = $stmt->fetch();
         
         // If user has never activated on this site before, block activation
@@ -234,7 +244,11 @@ try {
     // Check single domain only enforcement
     if (!empty($license['single_domain_only']) && $license['single_domain_only'] == 1) {
         // First, check if domain_registered is already set and different
-        if (!empty($license['domain_registered']) && $license['domain_registered'] !== $site_url) {
+        $registered_canonical = !empty($license['domain_registered'])
+            ? canonicalize_site_url($license['domain_registered'])
+            : false;
+
+        if (!empty($license['domain_registered']) && $registered_canonical !== $site_url_canonical) {
             json_response([
                 'success' => false,
                 'message' => 'License ini hanya dapat diaktifkan di satu domain. Domain yang sudah terdaftar: ' . $license['domain_registered'],
@@ -245,14 +259,15 @@ try {
         
         // Also check activations table for additional security
         $stmt = $db->prepare("
-            SELECT site_url 
-            FROM activations 
-            WHERE license_id = ? 
-            AND status = 'active' 
+            SELECT site_url
+            FROM activations
+            WHERE license_id = ?
+            AND status = 'active'
             AND site_url != ?
+            AND (site_url_canonical IS NULL OR site_url_canonical != ?)
             LIMIT 1
         ");
-        $stmt->execute([$license['id'], $site_url]);
+        $stmt->execute([$license['id'], $site_url, $site_url_canonical]);
         $existing_activation = $stmt->fetch();
         
         if ($existing_activation) {
@@ -276,7 +291,7 @@ try {
     if (empty($license['single_domain_only']) && !empty($license['max_domains']) && $license['max_domains'] > 0) {
         // Count distinct domains
         $stmt = $db->prepare("
-            SELECT COUNT(DISTINCT site_url) as domain_count
+            SELECT COUNT(DISTINCT COALESCE(site_url_canonical, site_url)) as domain_count
             FROM activations 
             WHERE license_id = ? 
             AND status = 'active'
@@ -287,12 +302,12 @@ try {
         // Check if current domain is new
         $stmt = $db->prepare("
             SELECT COUNT(*) as count
-            FROM activations 
-            WHERE license_id = ? 
-            AND site_url = ?
+            FROM activations
+            WHERE license_id = ?
+            AND (site_url = ? OR site_url_canonical = ?)
             AND status = 'active'
         ");
-        $stmt->execute([$license['id'], $site_url]);
+        $stmt->execute([$license['id'], $site_url, $site_url_canonical]);
         $is_existing = $stmt->fetch()['count'] > 0;
         
         if (!$is_existing && $domain_count >= $license['max_domains']) {
@@ -304,14 +319,15 @@ try {
         }
     }
     
-    // Check activation limit
-    $stmt = $db->prepare("SELECT COUNT(*) as count FROM activations WHERE license_id = ? AND status = 'active'");
+    // Check activation limit. Seats are counted per installation, so a license
+    // holding both an http:// and an https:// row for one site still uses one seat.
+    $stmt = $db->prepare("SELECT COUNT(DISTINCT COALESCE(site_url_canonical, site_url)) as count FROM activations WHERE license_id = ? AND status = 'active'");
     $stmt->execute([$license['id']]);
     $activation_count = $stmt->fetch()['count'];
-    
+
     // Check if site already activated
-    $stmt = $db->prepare("SELECT * FROM activations WHERE license_id = ? AND site_url = ?");
-    $stmt->execute([$license['id'], $site_url]);
+    $stmt = $db->prepare("SELECT * FROM activations WHERE license_id = ? AND (site_url = ? OR site_url_canonical = ?) ORDER BY status = 'active' DESC, id LIMIT 1");
+    $stmt->execute([$license['id'], $site_url, $site_url_canonical]);
     $existing = $stmt->fetch();
     
     if ($existing) {
@@ -351,9 +367,29 @@ try {
         $license = $stmt->fetch(); // Get fresh license data with lock
         
         // Re-check activation limit with locked license
-        $stmt = $db->prepare("SELECT COUNT(*) as count FROM activations WHERE license_id = ? AND status = 'active'");
+        $stmt = $db->prepare("SELECT COUNT(DISTINCT COALESCE(site_url_canonical, site_url)) as count FROM activations WHERE license_id = ? AND status = 'active'");
         $stmt->execute([$license['id']]);
         $activation_count = $stmt->fetch()['count'];
+
+        // Re-read the row under the license lock, so two concurrent activations
+        // of the same installation cannot both insert a seat.
+        $stmt = $db->prepare("SELECT * FROM activations WHERE license_id = ? AND (site_url = ? OR site_url_canonical = ?) ORDER BY status = 'active' DESC, id LIMIT 1");
+        $stmt->execute([$license['id'], $site_url, $site_url_canonical]);
+        $existing = $stmt->fetch();
+
+        if ($existing && $existing['status'] === 'active') {
+            $db->commit();
+            json_response([
+                'success' => true,
+                'data' => [
+                    'status' => $license['status'],
+                    'expires' => $license['expires'] ?: '',
+                    'activations' => $activation_count,
+                    'activation_limit' => $license['activation_limit']
+                ],
+                'message' => 'License sudah diaktifkan untuk site ini'
+            ]);
+        }
         
         if ($license['activation_limit'] > 0 && $activation_count >= $license['activation_limit']) {
             $db->rollBack();
@@ -370,20 +406,21 @@ try {
         if ($existing && $existing['status'] === 'deactivated') {
             // Reactivate existing activation
             $stmt = $db->prepare("
-                UPDATE activations 
-                SET status = 'active', 
+                UPDATE activations
+                SET status = 'active',
                     site_name = ?,
                     ip_address = ?,
+                    site_url_canonical = ?,
                     last_check = NOW(),
                     deactivated_at = NULL
-                WHERE license_id = ? 
-                AND site_url = ?
+                WHERE license_id = ?
+                AND (site_url = ? OR site_url_canonical = ?)
             ");
-            $stmt->execute([$site_name ?: null, $ip_address, $license['id'], $site_url]);
+            $stmt->execute([$site_name ?: null, $ip_address, $site_url_canonical, $license['id'], $site_url, $site_url_canonical]);
         } else {
             // New activation
-            $stmt = $db->prepare("INSERT INTO activations (license_id, site_url, site_name, ip_address, last_check) VALUES (?, ?, ?, ?, NOW())");
-            $stmt->execute([$license['id'], $site_url, $site_name ?: null, $ip_address]);
+            $stmt = $db->prepare("INSERT INTO activations (license_id, site_url, site_url_canonical, site_name, ip_address, last_check) VALUES (?, ?, ?, ?, ?, NOW())");
+            $stmt->execute([$license['id'], $site_url, $site_url_canonical, $site_name ?: null, $ip_address]);
         }
         
         // Update license status to active if not already (within same transaction)

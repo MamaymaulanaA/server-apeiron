@@ -27,12 +27,26 @@ if (!defined('ENVIRONMENT')) {
 }
 
 // Database Configuration
-// SECURITY: Use environment variables in production!
+// SECURITY: credentials come from config.env or the environment. Nothing that
+// identifies or unlocks a real database is hardcoded here — a missing setting
+// must fail closed rather than silently fall back to a committed value.
 if (!defined('DB_HOST')) define('DB_HOST', 'localhost');
-if (!defined('DB_NAME')) define('DB_NAME', 'u364155471_portal');
-if (!defined('DB_USER')) define('DB_USER', 'u364155471_portalapeiron');
-if (!defined('DB_PASS')) define('DB_PASS', '@PortalApr21');
 if (!defined('DB_CHARSET')) define('DB_CHARSET', 'utf8mb4');
+
+foreach (['DB_NAME', 'DB_USER', 'DB_PASS'] as $required_db_setting) {
+    if (defined($required_db_setting) && constant($required_db_setting) !== '') {
+        continue;
+    }
+
+    $value = getenv($required_db_setting);
+    if ($value !== false && $value !== '') {
+        define($required_db_setting, $value);
+        continue;
+    }
+
+    throw new Exception($required_db_setting . ' is not configured. Set it via config.env or environment variables.');
+}
+unset($required_db_setting, $value);
 
 // Security Keys
 // SECURITY: In production, secrets MUST come from config.env or environment variables.

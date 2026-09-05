@@ -5,11 +5,36 @@
 error_reporting(E_ALL);
 ini_set("display_errors", 1);
 
-$DB_HOST    = "localhost";
-$DB_NAME    = "u364155471_portal";
-$DB_USER    = "u364155471_portalapeiron";
-$DB_PASS    = "@PortalApr21";
-$DB_CHARSET = "utf8mb4";
+// Credentials come from config.env or the environment, never from this file.
+$env = [];
+if (is_readable(__DIR__ . "/config.env")) {
+    foreach (file(__DIR__ . "/config.env", FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+        if (strpos(trim($line), "#") === 0 || strpos($line, "=") === false) {
+            continue;
+        }
+        list($key, $value) = explode("=", $line, 2);
+        $env[trim($key)] = trim($value);
+    }
+}
+
+function debug_env(array $env, string $key, string $fallback = "")
+{
+    if (!empty($env[$key])) {
+        return $env[$key];
+    }
+    $value = getenv($key);
+    return ($value !== false && $value !== "") ? $value : $fallback;
+}
+
+$DB_HOST    = debug_env($env, "DB_HOST", "localhost");
+$DB_NAME    = debug_env($env, "DB_NAME");
+$DB_USER    = debug_env($env, "DB_USER");
+$DB_PASS    = debug_env($env, "DB_PASS");
+$DB_CHARSET = debug_env($env, "DB_CHARSET", "utf8mb4");
+
+if ($DB_NAME === "" || $DB_USER === "" || $DB_PASS === "") {
+    exit("Database credentials are not configured. Set DB_NAME, DB_USER and DB_PASS in config.env.");
+}
 
 $msg = "";
 $reset_done = false;

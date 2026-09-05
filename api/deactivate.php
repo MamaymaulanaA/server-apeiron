@@ -85,6 +85,16 @@ if ($site_url === false) {
     ], 400);
 }
 
+// Transport-independent identity used to match legacy and new activations alike.
+$site_url_canonical = canonicalize_site_url($site_url);
+if ($site_url_canonical === false) {
+    json_response([
+        'success' => false,
+        'message' => 'Invalid site URL format',
+        'error_code' => 'INVALID_URL'
+    ], 400);
+}
+
 // Validate request origin matches claimed site URL
 if (!validate_request_origin($site_url)) {
     // Log failed attempt
@@ -173,15 +183,16 @@ try {
     $db->beginTransaction();
     
     try {
+        // Dual-read: release the seat whichever representation registered it.
         $stmt = $db->prepare("
             UPDATE activations 
             SET status = 'deactivated', 
                 deactivated_at = NOW() 
             WHERE license_id = ? 
-            AND site_url = ? 
+            AND (site_url = ? OR site_url_canonical = ?)
             AND status = 'active'
         ");
-        $stmt->execute([$license['id'], $site_url]);
+        $stmt->execute([$license['id'], $site_url, $site_url_canonical]);
         
         if ($stmt->rowCount() > 0) {
             // Check if there are any remaining active activations

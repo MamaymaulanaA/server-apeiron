@@ -85,6 +85,16 @@ if ($site_url === false) {
     ], 400);
 }
 
+// Transport-independent identity used to match legacy and new activations alike.
+$site_url_canonical = canonicalize_site_url($site_url);
+if ($site_url_canonical === false) {
+    json_response([
+        'success' => false,
+        'message' => 'Invalid site URL format',
+        'error_code' => 'INVALID_URL'
+    ], 400);
+}
+
 // Validate request origin matches claimed site URL
 if (!validate_request_origin($site_url)) {
     // Log failed attempt
@@ -184,8 +194,16 @@ try {
     $activation_count = $stmt->fetch()['count'];
     
     // Check if this site is activated (only active activations)
-    $stmt = $db->prepare("SELECT * FROM activations WHERE license_id = ? AND site_url = ? AND status = 'active'");
-    $stmt->execute([$license['id'], $site_url]);
+    // Dual-read: legacy exact match first, canonical identity as the fallback,
+    // so an activation registered before the canonical column still resolves.
+    $stmt = $db->prepare("
+        SELECT * FROM activations
+        WHERE license_id = ?
+        AND (site_url = ? OR site_url_canonical = ?)
+        AND status = 'active'
+        LIMIT 1
+    ");
+    $stmt->execute([$license['id'], $site_url, $site_url_canonical]);
     $activation = $stmt->fetch();
     
     // Update last_check if activation exists (rate limit this to prevent DoS)

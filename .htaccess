@@ -4,6 +4,25 @@
     Deny from all
 </Files>
 
+# Security: environment files must never leave the server. config.env holds the
+# live database, API and encryption secrets. The pattern also covers copies such
+# as config.env.bak, config.env.old and .env.production.
+<FilesMatch "^(\.env|config\.env)($|\.)">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
+# Security: repository artifacts the running application never serves — schema
+# dumps and configuration templates.
+<FilesMatch "\.(sql|example)$">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
+# Security: tooling directories are not web routes. The migration runner in
+# particular must only ever be executed from the command line.
+RedirectMatch 404 ^/(tests|migrations)(/|$)
+
 # Enable CORS for API (handled by config.php - DO NOT use wildcard!)
 # SECURITY: CORS is handled by config.php with proper origin validation
 # Removing wildcard CORS to prevent security vulnerabilities
